@@ -1,5 +1,6 @@
 # 运行
 # mpiexec -np 12 python3 D_SAGA_COVTYPE.py > out
+# mpiexec -np 4 python3 D_SAGA_COVTYPE.py > out
 
 import math
 import matplotlib.pyplot as plt
@@ -22,7 +23,7 @@ from mpi4py import MPI
 #   'byzantineNodeSize': 1,
 #   'maxFeature' : 54,
 #   'findingType' : '1',
-#   'epoch': 10
+#   'epoch': 5
 # }
 dataSetConfig = {
   'name': 'covtype',
@@ -85,6 +86,7 @@ def loadXY(file, size):
     return None, None
 
 # ====================================================
+# ! deplicate
 def loadL(X):
   if NODE_RANK == 0:
     L = 0
@@ -100,47 +102,6 @@ def loadL(X):
   return L
 
 # ====================================================
-def loadFunc(X, Y):
-  Lambda = 1/SET_SIZE
-  ERR = math.log(1e30)
-  def Product(x, w):
-    product = x.dot(w[0:-1].transpose()) + w[-1]
-    product = product[0]
-    return product
-
-  # ====================================================
-  # 梯度
-  def G_Fi(i, w):
-    product = X[i, :].dot(w[0:-1].transpose()) + w[-1]
-    product = product[0]
-    # product = Product(X[i, :], w)
-    ext_X = np.hstack((X[i,:].toarray()[0], 1)).transpose()
-    if -Y[i]*product < ERR:
-      return Lambda * w - (1-1/(1+math.exp(-Y[i]*product)))*Y[i]*ext_X
-    else:
-      return Lambda * w - Y[i]*ext_X
-  # ====================================================
-  # 计算函数值
-  if NODE_RANK != 0:
-    return None, G_Fi
-  else:
-    X, Y = loadXY("full", SET_SIZE)
-    def F(w_path):
-      res = [0] * len(w_path)
-      for i in range(X.shape[0]):
-        for (k, w) in enumerate(w_path):
-          product = Product(X[i, :], w)
-          if -Y[i]*product < ERR:
-            res[k] += math.log(1+math.exp(-Y[i]*product))
-          else:
-            res[k] += -Y[i]*product
-        if i % 10 == 0:
-          log('[计算函数值] 已计算{}个数据'.format(i))
-      for (k, w) in enumerate(w_path):
-        res[k] = Lambda/2 * np.linalg.norm(w)**2 + res[k]/X.shape[0]
-      return res
-    return F, G_Fi
-
 def loadMasterFunc(**kw):
   def init():
     pass
@@ -148,9 +109,22 @@ def loadMasterFunc(**kw):
     return w
   return init, update
 
-def loadWorkerFunc(x0, dataPerNode, gamma, G_Fi, **kw):
+def loadWorkerFunc(x0, dataPerNode, gamma, **kw):
+  X, Y = loadXY(str(NODE_RANK), DATA_PER_NODE)
+  
   store = [x0] * dataPerNode
   G_avg = np.zeros(x0.shape)
+
+  Lambda = 1/SET_SIZE
+  ERR = math.log(1e30)
+  def G_Fi(i, w):
+    product = X[i, :].dot(w[0:-1].transpose()) + w[-1]
+    product = product[0]
+    ext_X = np.hstack((X[i,:].toarray()[0], 1)).transpose()
+    if -Y[i]*product < ERR:
+      return Lambda * w - (1-1/(1+math.exp(-Y[i]*product)))*Y[i]*ext_X
+    else:
+      return Lambda * w - Y[i]*ext_X
   def init():
     nonlocal store, G_avg
     for i in range(dataPerNode):
@@ -184,7 +158,7 @@ def loadFedSAGA():
   def SAGA_aggregate(wList):
     res = np.mean(wList, axis=0)
     return res
-  def FedSAGA(G_Fi, setSize, dataPerNode, x0, gamma, node_init, node_update, epoch=1, aggregate=SAGA_aggregate, **kw):
+  def FedSAGA(setSize, dataPerNode, x0, gamma, node_init, node_update, epoch=1, aggregate=SAGA_aggregate, **kw):
     # 初始化存储
     node_init()
     w = x0
@@ -264,19 +238,12 @@ def aggregate_sigmoid(wList):
   res = np.log(1/(1-res)-1)
   return res
 # ====================================================
-if NODE_RANK <= dataSetConfig['honestNodeSize']:
-  X, Y = loadXY(str(NODE_RANK), DATA_PER_NODE)
-  F, G_Fi = loadFunc(X, Y)
-else:
-  X, Y = 0, 1
-  F, G_Fi = lambda x: x, lambda x: x
-L = loadL(X)
+L = 2.5955926730836074
 Lambda = 1/SET_SIZE
 FedSAGA = loadFedSAGA()
 w0 = np.array([0.0] * (maxFeature+1))
 
 VRConfig = {
-  'G_Fi': G_Fi,
   'setSize': SET_SIZE,
   'dataPerNode': DATA_PER_NODE,
   'x0': w0,
@@ -296,8 +263,8 @@ else:
 
 # 不同的任务
 jobList = [
-  {'label': 'line aggregation', 'aggregate': aggregate_line},
-  {'label': 'geometric aggregation', 'aggregate': aggregate_geometric},
+  # {'label': 'line aggregation', 'aggregate': aggregate_line},
+  # {'label': 'geometric aggregation', 'aggregate': aggregate_geometric},
   {'label': 'sigmoid aggregation', 'aggregate': aggregate_sigmoid},
   # {'label': 'order_three aggregation', 'aggregate': aggregate_order_three},
   # {'label': 'hyperbolic_sin aggregation', 'aggregate': aggregate_hyperbolic_sin},
@@ -307,9 +274,27 @@ for job in jobList:
   _VRConfig['aggregate'] = job['aggregate']
   _, path = FedSAGA(**_VRConfig)
   job['path'] = path
-del X, Y
 
 if NODE_RANK == 0:
+  Lambda = 1/SET_SIZE
+  ERR = math.log(1e30)
+  X, Y = loadXY("full", SET_SIZE)
+  def F(w_path):
+    res = [0] * len(w_path)
+    for i in range(X.shape[0]):
+      for (k, w) in enumerate(w_path):
+        product = X[i, :].dot(w[0:-1].transpose()) + w[-1]
+        product = product[0]
+        if -Y[i]*product < ERR:
+          res[k] += math.log(1+math.exp(-Y[i]*product))
+        else:
+          res[k] += -Y[i]*product
+      if i % 10 == 0:
+        log('[计算函数值] 已计算{}个数据'.format(i))
+    for (k, w) in enumerate(w_path):
+      res[k] = Lambda/2 * np.linalg.norm(w)**2 + res[k]/X.shape[0]
+    return res
+  
   # 作图的长度
   SHOW_LENGTH = dataSetConfig['epoch']
   
@@ -318,12 +303,12 @@ if NODE_RANK == 0:
     plt.plot(range(SHOW_LENGTH+1), F_path, label=job['label'])
 
   # 中心化SAGA的收敛曲线
-  centralVRConfig = VRConfig.copy()
-  centralVRConfig['epoch'] *= 3
-  wmin, cp = CentralSAGA(**VRConfig)
-  F_c = F(cp[0:SHOW_LENGTH+1])
-  F_min = F([wmin])[0]
-  plt.plot(range(SHOW_LENGTH+1), F_c, label='Central SAGA')
+  # centralVRConfig = VRConfig.copy()
+  # centralVRConfig['epoch'] *= 3
+  # wmin, cp = CentralSAGA(**VRConfig)
+  # F_c = F(cp[0:SHOW_LENGTH+1])
+  # F_min = F([wmin])[0]
+  # plt.plot(range(SHOW_LENGTH+1), F_c, label='Central SAGA')
   
   timeStamp = time.strftime('%m%d%H%M%S', time.localtime())
   __dir__ = os.path.dirname(os.path.abspath(__file__))
@@ -332,7 +317,9 @@ if NODE_RANK == 0:
   plt.title(dataSetConfig['name'])
   plt.xlabel(r'$epoch$')
   plt.ylabel(r'$f(w)$')
-  plt.ylim(ymax=F([w0])[0]*1.1)
+  ymin, _ = plt.ylim()
+  ymax = F([w0])[0]
+  plt.ylim(ymax=ymax+0.1*(ymax-ymin))
   plt.legend()
 
   # plt.savefig(figName+'_accuracy')
